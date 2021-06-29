@@ -1,0 +1,194 @@
+#pragma TextEncoding = "MacRoman"
+#pragma rtGlobals=3		// Use modern global access method and strict wave access.
+#include <Wave Arithmetic Panel>
+
+// Sil Verheye, University of Amsterdam
+
+//===== Step 1: Rescaling EDM so that Fermi Energy is at E=0.
+
+Function/WAVE Rescale(EDM,Ef)
+	wave EDM
+	variable Ef
+	duplicate/O EDM, scaled_EDM
+	setscale/P x, dimoffset(EDM,0), dimdelta(EDM,0), "Angle", scaled_EDM
+	setscale/p y, dimoffset(EDM, 1) - Ef, dimdelta(EDM, 1),"eV", scaled_EDM
+	
+	return scaled_EDM
+End
+
+//==== Step 2: Extract MDC at energy E.	
+
+Function/WAVE myMDC(EDM, E)
+	wave EDM
+	variable E
+
+	Make/O/N=(Dimsize(EDM, 0)) MDC
+	MDC = EDM[p][scaleToIndex(EDM,E,1)]
+	return MDC
+End
+	
+//*IF NECESSARY* Change the angle scale to k-scale of MDC.
+
+Function degrees_to_rad(angle)
+	Variable angle
+	return angle * (pi / 180)
+End
+
+Function angle_to_k(angle, Ep)
+	Variable angle, Ep
+	return 0.5123 * sqrt(Ep) * sin(degrees_to_rad(angle))
+End
+
+Function scale(EDM, Ep, E)
+	wave EDM
+ 	variable Ep, E
+ 	variable angle = dimoffset(EDM,1)
+ 	variable kmin = angle_to_k(degrees_to_rad(angle), Ep)
+	variable kmax = angle_to_k(degrees_to_rad(-1*angle), Ep)
+	print kmin, kmax
+  
+	Make/O/N=(Dimsize(myMDC(EDM, E),0)) AngleToK
+	setscale/I x, kmin, kmax, "k (A^-1)" AngleToK
+	Duplicate/O EDM, kw
+	
+	setscale/I x, 1000* kmin, 1000*kmax, "k (A^-1)" kw
+
+	AngleToK = myMDC(EDM, E)[p][scaleToIndex(myMDC(EDM, E),E,1)]	
+
+End
+
+//*IF NECESSARY* Change the k-scale to angle scale.
+Function k_to_angle(k, Ep) //Ep = Photon energy
+	Variable k, Ep
+	return asin(k / (0.5123 * sqrt(Ep))) / (pi / 180)
+End
+
+//*IF NECESSARY* Determening the angle phi.
+
+Function get_angle(k_lat, k) //k_lat = 0.8267 A^-1 
+	Variable k_lat, k
+	Variable opposite, adjacent
+	opposite = k_lat - k
+	adjacent = k_lat 
+	return atan(opposite/adjacent) * (180/pi)
+End
+	
+//===== Step 4: Determine location for k_F.
+
+Function get_Kf(EDM, E)
+	wave EDM
+	variable E
+	variable Kf
+	wave MDC = myMDC(EDM, E)
+	wavestats/P/Q/R=(0,Dimsize(MDC,0)) MDC
+	Kf = v_maxRowLoc
+	return Kf
+End
+
+//===== Step 5: Extract EDCs at k_F and summing the EDC to determine if there is a gap.
+	
+Function myEDC(EDM, Ef, E)
+	wave EDM
+	variable Ef,E
+//	variable Kf = get_Kf(EDM, E)
+	variable Kf = -0.26637
+	duplicate/O EDM, dummy_w
+	setscale/I x, 0, Dimsize(EDM, 0), dummy_w
+//	Duplicate/O/R=(Kf,Kf)() dummy_w, EDC
+	Duplicate/O/R=(Kf,Kf)() EDM, EDC	
+	matrixtranspose EDC
+	
+	duplicate/O EDC, EDC_l
+	duplicate/O EDC, EDC_r
+	
+	variable n, E_initial, E_final
+	n = dimsize(EDC,0)
+	E_initial = indextoscale(EDC, 0, 0) 
+	E_final = indextoscale(EDC, n, 0)
+	
+	setscale/I x, E_initial - Ef, E_final - Ef, EDC_l
+	setscale/I x, -1*E_initial + Ef, -1*E_final + Ef, EDC_r
+	
+	
+	Make/O/N=(2*n)/D EDC_sum
+	setscale x, E_initial - Ef, -1*E_initial + Ef, EDC_sum
+	
+	EDC_sum = EDC_l(x) + EDC_r(x)
+	
+End
+
+
+//===== Step 6: Lor fit MDC at all E and obtain self energy.
+
+Function self_energy(EDM)
+	wave EDM
+	variable i,m
+	make/O/N=(Dimsize(EDM,0)) im_self_E
+	make/O/N=(Dimsize(EDM,0)) real_self_E
+	make/O/N=4 W_coef
+	make/O/N=4 W_sigma
+	make/O/n=(dimsize(EDM,0)) MDC
+	make/O/n=(dimsize(EDM,0)) energy
+	setscale y, 0, 0.1, im_self_E
+
+	m=0
+
+	for(i=dimoffset(EDM,1);i<0.0025;i+=dimdelta(EDM, 1))		
+		MDC = EDM[p][scaleToIndex(EDM,i,1)]
+		curvefit /Q/M=2/W=2 lor, MDC/D
+		im_self_E[m] = sqrt(W_coef[3])
+		real_self_E[m] = W_coef[2]
+		energy[m] = i
+
+		m+=1
+	
+	endfor
+
+	wavetransform zapnans im_self_E	//Deletes empty cells
+	
+	HilbertTransform/DEST=KK_Self_E im_self_E 
+	
+	setscale x, energy[0], energy[m], im_self_E
+	setscale x, energy[0], energy[m], real_self_E
+	setscale x, energy[0], energy[m], KK_Self_E
+	
+		
+
+
+End
+
+//===== Step 7: Find dispersion of EDM with EDC.
+
+Function kf(EDM)
+	wave EDM
+	variable i,j,k,m
+	
+	make/O/N=(dimsize(EDM,1)) energy_w
+	k = 0
+	
+	for(j=dimoffset(EDM,1);j<0.175+dimdelta(EDM,1);j+=dimdelta(EDM,1))
+		energy_w[k]=j
+		k+=1	
+	endfor
+	
+	make/O/N=(Dimsize(EDM,0)) edc_peak_w
+	make/O/N=(Dimsize(EDM,0)) k_position_w
+	m = 0
+	
+	for(i=dimoffset(EDM,0);i<(dimoffset(EDM,0)+(dimsize(EDM,0) * dimdelta(EDM,0))) + dimdelta(EDM,0);i+=dimdelta(EDM,0))
+		Duplicate/O/R=(i,i)() EDM, EDC	
+		matrixtranspose EDC
+		wavestats/P/Q EDC
+		if(v_max > 4500)
+			edc_peak_w[m] = energy_w[v_maxLoc]
+		else
+			edc_peak_w[m] = nan
+		endif
+		k_position_w[m] = i
+		
+		m += 1
+	endfor
+	
+	setscale/I x, k_position_w[0], k_position_w[m], edc_peak_w
+
+End
